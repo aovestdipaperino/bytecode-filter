@@ -1,0 +1,25 @@
+[package]
+name = "bytecode-filter"
+version = "0.1.0"
+edition = "2021"
+description = "Fast bytecode-compiled filter engine for delimiter-separated records"
+license = "MIT"
+authors = ["Enzo Lombardi"]
+repository = "https://github.com/aovestdipaperino/bytecode-filter"
+keywords = ["filter", "bytecode", "zero-copy", "simd", "parser"]
+categories = ["text-processing", "parser-implementations"]
+readme = "README.md"
+rust-version = "1.70"
+
+[dependencies]
+bytes = "1.5"
+memchr = "2.7"
+regex = "1.10"
+thiserror = "1.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "filter_eval"
+harness = false
