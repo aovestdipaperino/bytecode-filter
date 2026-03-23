@@ -142,13 +142,43 @@ pub fn load_filter_string(
         if trimmed.starts_with('@') {
             parse_directive(trimmed, &mut local_config)?;
         } else {
-            // Regular expression line
-            expression_lines.push(trimmed);
+            // Regular expression line — strip inline comments before joining.
+            // Without this, joining lines with " " collapses newlines and the
+            // lexer's # end-of-line comment would eat the rest of the expression.
+            let without_comment = strip_inline_comment(trimmed);
+            if !without_comment.is_empty() {
+                expression_lines.push(without_comment);
+            }
         }
     }
 
     let expression = expression_lines.join(" ");
     Ok(compile(&expression, &local_config)?)
+}
+
+/// Strip an inline `#` comment from an expression line, respecting quoted strings.
+/// Returns the expression portion (trimmed), or "" if nothing remains.
+fn strip_inline_comment(line: &str) -> &str {
+    let mut in_quote: Option<char> = None;
+    let mut prev_backslash = false;
+    for (i, ch) in line.char_indices() {
+        if prev_backslash {
+            prev_backslash = false;
+            continue;
+        }
+        if ch == '\\' {
+            prev_backslash = true;
+            continue;
+        }
+        match in_quote {
+            Some(q) if ch == q => in_quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => in_quote = Some(ch),
+            None if ch == '#' => return line[..i].trim_end(),
+            _ => {}
+        }
+    }
+    line
 }
 
 /// Parse a directive line and update the config.
@@ -322,5 +352,39 @@ mod tests {
         let config = test_config();
         let result = load_filter_string(content, &config);
         assert!(matches!(result, Err(LoadError::InvalidFieldIndex(_))));
+    }
+
+    #[test]
+    fn test_inline_comments_not_swallowed_after_join() {
+        // Inline # comments on each line must not eat subsequent AND clauses
+        // when the loader joins expression lines with " ".
+        let content = r#"
+            LEVEL == "error" # check level
+            AND CODE == "500" # check code
+        "#;
+
+        let config = test_config();
+        let filter = load_filter_string(content, &config).unwrap();
+
+        // Both conditions must be enforced
+        assert!(filter.evaluate(Bytes::from("error;;;500;;;body")));
+        assert!(!filter.evaluate(Bytes::from("error;;;200;;;body")));  // would pass if AND was eaten
+        assert!(!filter.evaluate(Bytes::from("info;;;500;;;body")));
+    }
+
+    #[test]
+    fn test_inline_comment_respects_quoted_hash() {
+        // A # inside quotes must not be treated as a comment
+        let content = r#"
+            @field TAG = 0
+            TAG == "a#b"
+        "#;
+
+        let mut config = ParserConfig::default();
+        config.add_field("TAG", 0);
+        let filter = load_filter_string(content, &config).unwrap();
+
+        assert!(filter.evaluate(Bytes::from("a#b")));
+        assert!(!filter.evaluate(Bytes::from("a")));
     }
 }

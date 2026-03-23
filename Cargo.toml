@@ -1,6 +1,6 @@
 [package]
 name = "bytecode-filter"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Fast bytecode-compiled filter engine for delimiter-separated records"
 license = "MIT"

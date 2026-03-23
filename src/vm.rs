@@ -417,6 +417,350 @@ impl CompiledFilter {
         }
     }
 
+    /// Like `evaluate`, but prints a step-by-step trace to stderr when the
+    /// filter returns `true`. Useful for debugging false-positive promotions.
+    pub fn evaluate_debug(&self, payload: Bytes) -> bool {
+        let mut parts = PayloadParts::new_lazy(payload);
+        let delim_len = self.delimiter.len();
+
+        let mut stack = [false; 32];
+        let mut sp: usize = 0;
+        let mut pc: usize = 0;
+
+        let payload_bytes = parts.payload().as_ref() as *const [u8];
+        let payload_bytes: &[u8] = unsafe { &*payload_bytes };
+
+        let mut trace_lines: Vec<String> = Vec::new();
+
+        loop {
+            debug_assert!(pc < self.bytecode.len());
+            debug_assert!(sp < 32);
+
+            match self.bytecode[pc] {
+                0x01 => {
+                    stack[sp] = true;
+                    trace_lines.push(format!("  pc={pc:3} PushTrue → stack[{sp}]=true"));
+                    sp += 1; pc += 1;
+                }
+                0x02 => {
+                    stack[sp] = false;
+                    trace_lines.push(format!("  pc={pc:3} PushFalse → stack[{sp}]=false"));
+                    sp += 1; pc += 1;
+                }
+                0x10 => {
+                    let idx = read_u16(&self.bytecode, pc + 1) as usize;
+                    let result = self.searchers[idx].find(payload_bytes).is_some();
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} Contains str[{idx}]={:?} → {result}",
+                        String::from_utf8_lossy(&self.strings[idx])
+                    ));
+                    sp += 1; pc += 3;
+                }
+                0x11 => {
+                    let idx = read_u16(&self.bytecode, pc + 1) as usize;
+                    let result = payload_bytes.starts_with(&self.strings[idx]);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} StartsWith str[{idx}]={:?} → {result}",
+                        String::from_utf8_lossy(&self.strings[idx])
+                    ));
+                    sp += 1; pc += 3;
+                }
+                0x12 => {
+                    let idx = read_u16(&self.bytecode, pc + 1) as usize;
+                    let result = payload_bytes.ends_with(&self.strings[idx]);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} EndsWith str[{idx}]={:?} → {result}",
+                        String::from_utf8_lossy(&self.strings[idx])
+                    ));
+                    sp += 1; pc += 3;
+                }
+                0x13 => {
+                    let idx = read_u16(&self.bytecode, pc + 1) as usize;
+                    let result = payload_bytes == &self.strings[idx][..];
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} Equals str[{idx}]={:?} → {result}",
+                        String::from_utf8_lossy(&self.strings[idx])
+                    ));
+                    sp += 1; pc += 3;
+                }
+                0x20 => {
+                    let idx = read_u16(&self.bytecode, pc + 1) as usize;
+                    let result = self.regexes[idx].is_match(payload_bytes);
+                    stack[sp] = result;
+                    trace_lines.push(format!("  pc={pc:3} Matches regex[{idx}] → {result}"));
+                    sp += 1; pc += 3;
+                }
+                0x30 => {
+                    sp -= 1;
+                    let result = stack[sp - 1] && stack[sp];
+                    stack[sp - 1] = result;
+                    trace_lines.push(format!("  pc={pc:3} And → {result}"));
+                    pc += 1;
+                }
+                0x31 => {
+                    sp -= 1;
+                    let result = stack[sp - 1] || stack[sp];
+                    stack[sp - 1] = result;
+                    trace_lines.push(format!("  pc={pc:3} Or → {result}"));
+                    pc += 1;
+                }
+                0x32 => {
+                    stack[sp - 1] = !stack[sp - 1];
+                    trace_lines.push(format!("  pc={pc:3} Not → {}", stack[sp - 1]));
+                    pc += 1;
+                }
+                0x40 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let str_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let result = self.searchers[str_idx].find(part).is_some();
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartContains part[{part_idx}]={:?} str[{str_idx}]={:?} → {result}",
+                        String::from_utf8_lossy(part),
+                        String::from_utf8_lossy(&self.strings[str_idx])
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x41 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let str_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let result = part.starts_with(&self.strings[str_idx]);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartStartsWith part[{part_idx}]={:?} str[{str_idx}]={:?} → {result}",
+                        String::from_utf8_lossy(part),
+                        String::from_utf8_lossy(&self.strings[str_idx])
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x42 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let str_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let result = part.ends_with(&self.strings[str_idx]);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartEndsWith part[{part_idx}]={:?} str[{str_idx}]={:?} → {result}",
+                        String::from_utf8_lossy(part),
+                        String::from_utf8_lossy(&self.strings[str_idx])
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x43 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let str_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let result = part == &self.strings[str_idx][..];
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartEquals part[{part_idx}]={:?} str[{str_idx}]={:?} → {result}",
+                        String::from_utf8_lossy(part),
+                        String::from_utf8_lossy(&self.strings[str_idx])
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x44 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let regex_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let result = self.regexes[regex_idx].is_match(part);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartMatches part[{part_idx}]={:?} regex[{regex_idx}] → {result}",
+                        String::from_utf8_lossy(part)
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x45 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let result = parts.get(part_idx).is_empty();
+                    stack[sp] = result;
+                    trace_lines.push(format!("  pc={pc:3} PartIsEmpty part[{part_idx}] → {result}"));
+                    sp += 1; pc += 2;
+                }
+                0x46 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let result = !parts.get(part_idx).is_empty();
+                    stack[sp] = result;
+                    trace_lines.push(format!("  pc={pc:3} PartNotEmpty part[{part_idx}] → {result}"));
+                    sp += 1; pc += 2;
+                }
+                0x47 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let set_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let set = &self.string_sets[set_idx];
+                    let result = set.iter().any(|&si| part == &self.strings[si as usize][..]);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartInSet part[{part_idx}]={:?} set[{set_idx}] → {result}",
+                        String::from_utf8_lossy(part)
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x48 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let str_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let result = part.eq_ignore_ascii_case(&self.strings[str_idx]);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartIEquals part[{part_idx}]={:?} str[{str_idx}]={:?} → {result}",
+                        String::from_utf8_lossy(part),
+                        String::from_utf8_lossy(&self.strings[str_idx])
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x49 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let str_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let part = parts.get(part_idx);
+                    let needle = &self.strings[str_idx];
+                    let result = icontains(part, needle);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} PartIContains part[{part_idx}]={:?} str[{str_idx}]={:?} → {result}",
+                        String::from_utf8_lossy(part),
+                        String::from_utf8_lossy(&self.strings[str_idx])
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x50 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let hdr_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    let val_idx = read_u16(&self.bytecode, pc + 4) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let headers = parts.get(part_idx);
+                    let header_name = &self.strings[hdr_idx];
+                    let expected = &self.strings[val_idx];
+                    let extracted = extract_header_value(headers, header_name);
+                    let result = extracted.map(|v| v == &expected[..]).unwrap_or(false);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} HeaderEquals part[{part_idx}] hdr={:?} expected={:?} got={:?} → {result}",
+                        String::from_utf8_lossy(header_name),
+                        String::from_utf8_lossy(expected),
+                        extracted.map(|v| String::from_utf8_lossy(v).to_string())
+                    ));
+                    sp += 1; pc += 6;
+                }
+                0x51 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let hdr_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    let val_idx = read_u16(&self.bytecode, pc + 4) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let headers = parts.get(part_idx);
+                    let header_name = &self.strings[hdr_idx];
+                    let expected = &self.strings[val_idx];
+                    let extracted = extract_header_value(headers, header_name);
+                    let result = extracted.map(|v| v.eq_ignore_ascii_case(expected)).unwrap_or(false);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} HeaderIEquals part[{part_idx}] hdr={:?} expected={:?} got={:?} → {result}",
+                        String::from_utf8_lossy(header_name),
+                        String::from_utf8_lossy(expected),
+                        extracted.map(|v| String::from_utf8_lossy(v).to_string())
+                    ));
+                    sp += 1; pc += 6;
+                }
+                0x52 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let hdr_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    let val_idx = read_u16(&self.bytecode, pc + 4) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let headers = parts.get(part_idx);
+                    let header_name = &self.strings[hdr_idx];
+                    let extracted = extract_header_value(headers, header_name);
+                    let result = extracted.map(|v| self.searchers[val_idx].find(v).is_some()).unwrap_or(false);
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} HeaderContains part[{part_idx}] hdr={:?} needle={:?} got={:?} → {result}",
+                        String::from_utf8_lossy(header_name),
+                        String::from_utf8_lossy(&self.strings[val_idx]),
+                        extracted.map(|v| String::from_utf8_lossy(v).to_string())
+                    ));
+                    sp += 1; pc += 6;
+                }
+                0x53 => {
+                    let part_idx = self.bytecode[pc + 1] as usize;
+                    let hdr_idx = read_u16(&self.bytecode, pc + 2) as usize;
+                    parts.ensure(part_idx, &self.delimiter_finder, delim_len);
+                    let headers = parts.get(part_idx);
+                    let header_name = &self.strings[hdr_idx];
+                    let result = extract_header_value(headers, header_name).is_some();
+                    stack[sp] = result;
+                    trace_lines.push(format!(
+                        "  pc={pc:3} HeaderExists part[{part_idx}] hdr={:?} → {result}",
+                        String::from_utf8_lossy(header_name)
+                    ));
+                    sp += 1; pc += 4;
+                }
+                0x70 => {
+                    if !stack[sp - 1] {
+                        let offset = read_i16(&self.bytecode, pc + 1);
+                        trace_lines.push(format!("  pc={pc:3} JumpIfFalse → false, jump by {offset}"));
+                        pc = (pc as isize + offset as isize) as usize;
+                    } else {
+                        trace_lines.push(format!("  pc={pc:3} JumpIfFalse → true, pop & continue"));
+                        sp -= 1;
+                        pc += 3;
+                    }
+                }
+                0x71 => {
+                    if stack[sp - 1] {
+                        let offset = read_i16(&self.bytecode, pc + 1);
+                        trace_lines.push(format!("  pc={pc:3} JumpIfTrue → true, jump by {offset}"));
+                        pc = (pc as isize + offset as isize) as usize;
+                    } else {
+                        trace_lines.push(format!("  pc={pc:3} JumpIfTrue → false, pop & continue"));
+                        sp -= 1;
+                        pc += 3;
+                    }
+                }
+                0x60 => {
+                    let n = read_u16(&self.bytecode, pc + 1);
+                    let result = rand_1_in_n(n);
+                    stack[sp] = result;
+                    trace_lines.push(format!("  pc={pc:3} Rand(1/{n}) → {result}"));
+                    sp += 1; pc += 3;
+                }
+                0xFF => {
+                    let result = stack[sp - 1];
+                    if result {
+                        eprintln!("=== FILTER DEBUG (result=true) filter={:?} ===", self.source);
+                        for line in &trace_lines {
+                            eprintln!("{line}");
+                        }
+                        eprintln!("=== END FILTER DEBUG ===");
+                    }
+                    return result;
+                }
+                _ => {
+                    #[cfg(debug_assertions)]
+                    panic!("Unknown opcode: 0x{:02X} at pc={}", self.bytecode[pc], pc);
+                    #[cfg(not(debug_assertions))]
+                    return false;
+                }
+            }
+        }
+    }
+
     /// Get the original filter source.
     pub fn source(&self) -> &str {
         &self.source
