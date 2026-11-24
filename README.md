@@ -1,5 +1,7 @@
 # bytecode-filter
 
+[![GitHub stars](https://img.shields.io/github/stars/aovestdipaperino/bytecode-filter?logo=github&color=brightgreen)](https://github.com/aovestdipaperino/bytecode-filter/stargazers)
+
 A fast bytecode-compiled filter engine for delimiter-separated records.
 
 Filters are expressed in a small DSL, compiled to bytecode at startup, and evaluated with **zero allocations** in the hot path.
